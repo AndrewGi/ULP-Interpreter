@@ -25,7 +25,7 @@ fn u64_from_slice(bytes: &[u8]) -> u64 {
 fn read_null_terminated_string(bytes: &[u8]) -> String {
     for i in 0..bytes.len() {
         if bytes[i] == 0 {
-            String::from(bytes[0..i])
+            return String::from_utf8(bytes[..i].to_vec()).expect("Unable to read null-terminated string")
         }
     }
     String::default()
@@ -150,7 +150,7 @@ impl ELFSectionHeader {
         }
     }
     pub fn name_from_shstrtab(&mut self, shstrtab: &[u8]) -> &str {
-        self.name = read_null_terminated_string(shstrtab[self.name_offset..]);
+        self.name = read_null_terminated_string(&shstrtab[self.name_offset as usize..]);
         &self.name
     }
 }
@@ -160,12 +160,11 @@ pub struct ELFSection {
 }
 impl ELFSection {
     pub fn from_entire_elf(section_header: ELFSectionHeader, entire_buffer: &[u8]) -> ELFSection {
+        let data = ::std::vec::Vec::from(
+            &entire_buffer[section_header.link as usize .. (section_header.link + section_header.size) as usize]);
         ELFSection::from_known(
             section_header,
-            ::std::vec::Vec::from(
-                &entire_buffer[section_header.link as usize
-                                   ..(section_header.link + section_header.size) as usize],
-            ),
+            data
         )
     }
     pub fn from_known(section_header: ELFSectionHeader, data: ::std::vec::Vec<u8>) -> ELFSection {
@@ -177,8 +176,8 @@ impl ELFSection {
 }
 pub struct ELF {
     pub header: ELFHeader,
-    pub programs: ::std::vec::Vec<ELFProgramHeader>,
-    pub sections: ::std::vec::Vec<ELFSectionHeader>,
+    pub programs: ::std::vec::Vec<ELFProgram>,
+    pub sections: ::std::vec::Vec<ELFSection>,
 }
 pub struct ULP {
     pub elf: ELF,
@@ -187,10 +186,9 @@ impl ELF {
     pub fn from_file(file: &mut ::std::fs::File) -> ELF {
         use std::io::*;
 
-        let ref mut file_buffer = ::std::file
-            .read_to_end(file_buffer)
-            .expect("unable to read file");
-        from_bytes(&file_buffer)
+        let ref mut file_buffer = ::std::vec::Vec::new();
+        file.read_to_end(file_buffer).expect("unable to read file");
+        ELF::from_bytes(&file_buffer)
     }
     pub fn from_bytes(bytes: &[u8]) -> ELF {
         let mut elf = ELF {
@@ -216,29 +214,30 @@ impl ELF {
         for i in 0..elf_header.num_of_section_header_entries {
             let index =
                 (elf_header.section_header_start + (i * elf_header.section_size) as u32) as usize;
-            elf.sections.push(ELFSectionHeader::from_binary(
+            elf.sections.push(ELFSection::from_entire_elf(ELFSectionHeader::from_binary(
                 &bytes[index..index + elf_header.section_size as usize],
-            ));
+            ), bytes));
         }
 
         elf
     }
-    pub fn load_section_names(&self) {
-        let shstrtab = self.sections
+    pub fn load_section_names(&mut self) {
+        let shstrtab_data = &self.sections
             .iter()
             .enumerate()
-            .find(|&sec| sec.1.section_header_type == 0x3)
+            .find(|&sec| sec.1.header.section_header_type == 0x3)
             .expect("shstrtab not found")
-            .1;
-        for &mut section in &mut self.sections {
-            section.name_from_shstrtab(shstrtab);
-        }
+            .1.data[..];
+        self.load_section_names_from_table(&shstrtab_data);
+    }
+    pub fn load_section_names_from_table(&mut self, table: &[u8]) {
+        self.sections.iter().enumerate().map(|(_, &mut sec)| sec.header.name_from_shstrtab(&table));
     }
 }
 impl ToString for ELF {
     fn to_string(&self) -> String {
-        String::default() +"Sections:\n"
-            + self.sections.iter().enumerate().map(|iter|
-        "[".
+            self.sections
+                .iter()
+                .fold("Sections:\n".to_string(), |sum, iter| sum + &iter.header.name + "\n")
     }
 }
