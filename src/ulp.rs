@@ -14,6 +14,7 @@ fn u32_from_slice(bytes: &[u8]) -> u32 {
     );
     u16_from_slice(&bytes[0..2]) as u32 | ((u16_from_slice(&bytes[2..4]) as u32) << 16)
 }
+#[allow(dead_code)]
 fn u64_from_slice(bytes: &[u8]) -> u64 {
     debug_assert!(
         bytes.len() == 8,
@@ -50,7 +51,7 @@ pub struct ELFHeader {
     pub num_of_program_header_entries: u16,
     pub section_size: u16,
     pub num_of_section_header_entries: u16,
-    pub section_index: u16,
+    pub shstrtab_index: u16,
 }
 
 impl ELFHeader {
@@ -75,7 +76,7 @@ impl ELFHeader {
             num_of_program_header_entries: u16_from_slice(&binary[0x2C..0x2E]),
             section_size: u16_from_slice(&binary[0x2E..0x30]),
             num_of_section_header_entries: u16_from_slice(&binary[0x30..0x32]),
-            section_index: u16_from_slice(&binary[0x32..0x34]),
+            shstrtab_index: u16_from_slice(&binary[0x32..0x34]),
         }
     }
     pub fn default() -> ELFHeader {
@@ -86,6 +87,8 @@ impl ELFHeader {
         self.magic_number == 0x464c457f
     }
 }
+
+#[allow(dead_code)]
 pub struct ELFProgramHeader {
     header_type: u32,
     offset: u32,
@@ -110,6 +113,8 @@ impl ELFProgramHeader {
         }
     }
 }
+
+#[allow(dead_code)]
 pub struct ELFProgram {
     header: ELFProgramHeader,
 }
@@ -120,6 +125,7 @@ impl ELFProgram {
         }
     }
 }
+#[allow(dead_code)]
 pub struct ELFSectionHeader {
     name: String,
     name_offset: u32, //Pointer to .shstrtab string
@@ -151,6 +157,9 @@ impl ELFSectionHeader {
     }
     pub fn name_from_shstrtab(&mut self, shstrtab: &[u8]) -> &str {
         self.name = read_null_terminated_string(&shstrtab[self.name_offset as usize..]);
+        if self.name.is_empty() {
+            self.name = "NULL".to_string();
+        };
         &self.name
     }
 }
@@ -161,7 +170,7 @@ pub struct ELFSection {
 impl ELFSection {
     pub fn from_entire_elf(section_header: ELFSectionHeader, entire_buffer: &[u8]) -> ELFSection {
         let data = ::std::vec::Vec::from(
-            &entire_buffer[section_header.link as usize .. (section_header.link + section_header.size) as usize]);
+            &entire_buffer[section_header.offset as usize .. (section_header.offset + section_header.size) as usize]);
         ELFSection::from_known(
             section_header,
             data
@@ -178,7 +187,9 @@ pub struct ELF {
     pub header: ELFHeader,
     pub programs: ::std::vec::Vec<ELFProgram>,
     pub sections: ::std::vec::Vec<ELFSection>,
+    pub data: ::std::vec::Vec<u8>
 }
+
 pub struct ULP {
     pub elf: ELF,
 }
@@ -192,52 +203,52 @@ impl ELF {
     }
     pub fn from_bytes(bytes: &[u8]) -> ELF {
         let mut elf = ELF {
-            header: ELFHeader::default(),
+            header: ELFHeader::from_binary(&bytes[0..0x34]),
             programs: ::std::vec::Vec::default(),
             sections: ::std::vec::Vec::default(),
+            data: ::std::vec::Vec::default()
         };
-
         //Header
-        let elf_header = ELFHeader::from_binary(&bytes[0..0x34]);
-
         //Programs
         let mut elf_programs = ::std::vec::Vec::new();
-        for i in 0..elf_header.num_of_program_header_entries {
-            let index = (elf_header.program_header_start
-                + (i * elf_header.program_header_size) as u32) as usize;
+        for i in 0..elf.header.num_of_program_header_entries {
+            let index = (elf.header.program_header_start
+                + (i * elf.header.program_header_size) as u32) as usize;
             elf_programs.push(ELFProgram::from(ELFProgramHeader::from_binary(
-                &bytes[index..index + elf_header.program_header_size as usize],
+                &bytes[index..index + elf.header.program_header_size as usize],
             )));
         }
-
         //Sections
-        for i in 0..elf_header.num_of_section_header_entries {
+        for i in 0..elf.header.num_of_section_header_entries {
             let index =
-                (elf_header.section_header_start + (i * elf_header.section_size) as u32) as usize;
+                (elf.header.section_header_start + (i * elf.header.section_size) as u32) as usize;
             elf.sections.push(ELFSection::from_entire_elf(ELFSectionHeader::from_binary(
-                &bytes[index..index + elf_header.section_size as usize],
+                &bytes[index..index + elf.header.section_size as usize],
             ), bytes));
         }
 
+        //Map virtual data
+        for section in &elf.sections {
+
+        }
+        elf.load_section_names();
         elf
     }
     pub fn load_section_names(&mut self) {
-        let shstrtab_data = &self.sections
-            .iter()
-            .enumerate()
-            .find(|&sec| sec.1.header.section_header_type == 0x3)
-            .expect("shstrtab not found")
-            .1.data[..];
-        self.load_section_names_from_table(&shstrtab_data);
+        let data = self.sections[self.header.shstrtab_index as usize].data.clone();
+        self.load_section_names_from_table(&data[..]);
     }
     pub fn load_section_names_from_table(&mut self, table: &[u8]) {
-        self.sections.iter().enumerate().map(|(_, &mut sec)| sec.header.name_from_shstrtab(&table));
+        for mut sec in &mut self.sections {
+            sec.header.name_from_shstrtab(table);
+        }
     }
 }
 impl ToString for ELF {
     fn to_string(&self) -> String {
+
             self.sections
                 .iter()
-                .fold("Sections:\n".to_string(), |sum, iter| sum + &iter.header.name + "\n")
+                .fold(format!("Programs: {}\n", self.programs.len()), |sum, iter| sum + &iter.header.name + "\n")
     }
 }
